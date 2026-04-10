@@ -4,60 +4,52 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
 import { Client } from "@notionhq/client";
 
-// 初始化 Notion 客戶端
+// 初始化 Notion
 const notion = new Client({ auth: process.env.NOTION_TOKEN });
 const server = new McpServer({
-  name: "Notion-Professional-Bridge",
-  version: "2.0.0",
+  name: "Notion-Pro-Bridge",
+  version: "2.1.0",
 });
 
-// 1. 【搜尋工具】搜尋頁面或資料庫
-server.tool("search_notion", { 
-  query: z.string().describe("搜尋關鍵字") 
-}, async ({ query }) => {
-  const response = await notion.search({ query, page_size: 10 });
-  return { content: [{ type: "text", text: JSON.stringify(response.results) }] };
+// --- 註冊工具 (全部加上 try-catch 防止崩潰) ---
+
+// 1. 搜尋
+server.tool("search_notion", { query: z.string() }, async ({ query }) => {
+  try {
+    const response = await notion.search({ query, page_size: 5 });
+    return { content: [{ type: "text", text: JSON.stringify(response.results) }] };
+  } catch (e: any) {
+    return { content: [{ type: "text", text: `Error: ${e.message}` }] };
+  }
 });
 
-// 2. 【讀取工具】獲取頁面詳細內容 (包含所有區塊)
-server.tool("get_page_content", { 
-  page_id: z.string().describe("Notion 頁面 ID") 
-}, async ({ page_id }) => {
-  const blocks = await notion.blocks.children.list({ block_id: page_id });
-  return { content: [{ type: "text", text: JSON.stringify(blocks.results) }] };
+// 2. 讀取頁面
+server.tool("get_page_content", { page_id: z.string() }, async ({ page_id }) => {
+  try {
+    const blocks = await notion.blocks.children.list({ block_id: page_id });
+    return { content: [{ type: "text", text: JSON.stringify(blocks.results) }] };
+  } catch (e: any) {
+    return { content: [{ type: "text", text: `Error: ${e.message}` }] };
+  }
 });
 
-// 3. 【建立工具】在指定父頁面下開立新頁面 (新專案)
-server.tool("create_notion_page", {
-  parent_id: z.string().describe("父頁面的 ID"),
-  title: z.string().describe("新頁面的標題")
-}, async ({ parent_id, title }) => {
-  const response = await notion.pages.create({
-    parent: { page_id: parent_id },
-    properties: { title: [{ text: { content: title } }] }
-  });
-  return { content: [{ type: "text", text: `已成功建立頁面！網址：${(response as any).url}` }] };
+// 3. 建立頁面
+server.tool("create_notion_page", { parent_id: z.string(), title: z.string() }, async ({ parent_id, title }) => {
+  try {
+    const response = await notion.pages.create({
+      parent: { page_id: parent_id },
+      properties: { title: [{ text: { content: title } }] }
+    });
+    return { content: [{ type: "text", text: `成功建立: ${(response as any).url}` }] };
+  } catch (e: any) {
+    return { content: [{ type: "text", text: `Error: ${e.message}` }] };
+  }
 });
 
-// 4. 【寫入工具】在頁面末尾新增內容 (Append blocks)
-server.tool("append_to_page", {
-  page_id: z.string().describe("頁面 ID"),
-  content: z.string().describe("要新增的文字內容")
-}, async ({ page_id, content }) => {
-  await notion.blocks.children.append({
-    block_id: page_id,
-    children: [{
-      object: 'block',
-      type: 'paragraph',
-      paragraph: { rich_text: [{ type: 'text', text: { content } }] }
-    }]
-  });
-  return { content: [{ type: "text", text: "內容已成功寫入頁面！" }] };
-});
-
-// --- 以下為 SSE 與 安全防護 邏輯 (保持不變) ---
 const app = express();
-app.use(express.json());
+
+// 💡 修正 502 的關鍵：不要使用全域 express.json()
+// 因為 SSEServerTransport 會自己處理 POST body，全域解析會導致衝突
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -66,23 +58,31 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use((req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (process.env.MY_AUTH_PASSWORD && authHeader !== `Bearer ${process.env.MY_AUTH_PASSWORD}`) {
-    return res.status(401).send("Unauthorized");
-  }
-  next();
-});
+// 健康檢查路徑 (用來測試 502)
+app.get("/", (req, res) => res.send("Notion MCP Server is Running!"));
 
+// SSE 連線
 let transport: SSEServerTransport | null = null;
 app.get("/sse", async (req, res) => {
+  console.log("🔔 收到 SSE 連線請求");
   transport = new SSEServerTransport("/messages", res);
   await server.connect(transport);
 });
 
 app.post("/messages", async (req, res) => {
-  if (transport) await transport.handlePostMessage(req, res);
+  if (transport) {
+    await transport.handlePostMessage(req, res);
+  } else {
+    res.status(503).send("SSE not initialized");
+  }
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, "0.0.0.0", () => console.log(`🚀 全功能 Notion MCP 啟動在 Port ${port}`));
+// 全域錯誤捕捉，防止 Node 直接結束進程
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+const port = process.env.PORT || 10000;
+app.listen(port, "0.0.0.0", () => {
+  console.log(`🚀 Server 啟動於 port ${port}`);
+});
