@@ -62,11 +62,25 @@ app.use((req, res, next) => {
 app.get("/", (req, res) => res.send("Notion MCP Server is Running!"));
 
 // SSE 連線
+// SSE 連線
 let transport: SSEServerTransport | null = null;
+
 app.get("/sse", async (req, res) => {
   console.log("🔔 收到 SSE 連線請求");
+  
+  // 【關鍵修復】如果已經有舊的連線，先強制掛斷清理掉！
+  if (transport) {
+    console.log("🧹 清理舊的 SSE 連線...");
+    try {
+      await server.close();
+    } catch (e) {
+      console.error("關閉連線時發生錯誤", e);
+    }
+  }
+
   transport = new SSEServerTransport("/messages", res);
   await server.connect(transport);
+  console.log("✅ 新的 SSE 連線建立成功！");
 });
 
 app.post("/messages", async (req, res) => {
@@ -75,14 +89,4 @@ app.post("/messages", async (req, res) => {
   } else {
     res.status(503).send("SSE not initialized");
   }
-});
-
-// 全域錯誤捕捉，防止 Node 直接結束進程
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-const port = process.env.PORT || 10000;
-app.listen(port, "0.0.0.0", () => {
-  console.log(`🚀 Server 啟動於 port ${port}`);
 });
