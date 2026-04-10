@@ -11,9 +11,7 @@ const server = new McpServer({
   version: "2.1.0",
 });
 
-// --- 註冊工具 (全部加上 try-catch 防止崩潰) ---
-
-// 1. 搜尋
+// 1. 搜尋工具
 server.tool("search_notion", { query: z.string() }, async ({ query }) => {
   try {
     const response = await notion.search({ query, page_size: 5 });
@@ -23,7 +21,7 @@ server.tool("search_notion", { query: z.string() }, async ({ query }) => {
   }
 });
 
-// 2. 讀取頁面
+// 2. 讀取頁面工具
 server.tool("get_page_content", { page_id: z.string() }, async ({ page_id }) => {
   try {
     const blocks = await notion.blocks.children.list({ block_id: page_id });
@@ -33,7 +31,7 @@ server.tool("get_page_content", { page_id: z.string() }, async ({ page_id }) => 
   }
 });
 
-// 3. 建立頁面
+// 3. 建立頁面工具
 server.tool("create_notion_page", { parent_id: z.string(), title: z.string() }, async ({ parent_id, title }) => {
   try {
     const response = await notion.pages.create({
@@ -48,8 +46,6 @@ server.tool("create_notion_page", { parent_id: z.string(), title: z.string() }, 
 
 const app = express();
 
-// 💡 修正 502 的關鍵：不要使用全域 express.json()
-// 因為 SSEServerTransport 會自己處理 POST body，全域解析會導致衝突
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -58,29 +54,31 @@ app.use((req, res, next) => {
   next();
 });
 
-// 健康檢查路徑 (用來測試 502)
 app.get("/", (req, res) => res.send("Notion MCP Server is Running!"));
 
-// SSE 連線
-// SSE 連線
+// SSE 連線與防佔線機制
 let transport: SSEServerTransport | null = null;
 
 app.get("/sse", async (req, res) => {
   console.log("🔔 收到 SSE 連線請求");
   
-  // 【關鍵修復】如果已經有舊的連線，先強制掛斷清理掉！
+  // 【關鍵修復】如果發現舊的連線，先把它掛斷，避免佔線崩潰
   if (transport) {
-    console.log("🧹 清理舊的 SSE 連線...");
+    console.log("🧹 發現舊連線，正在清理...");
     try {
-      await server.close();
+      await transport.close();
     } catch (e) {
-      console.error("關閉連線時發生錯誤", e);
+      console.error("清理連線時略過錯誤");
     }
   }
 
   transport = new SSEServerTransport("/messages", res);
-  await server.connect(transport);
-  console.log("✅ 新的 SSE 連線建立成功！");
+  try {
+    await server.connect(transport);
+    console.log("✅ 新的 SSE 連線建立成功！");
+  } catch (e: any) {
+    console.error("⚠️ 建立連線失敗:", e.message);
+  }
 });
 
 app.post("/messages", async (req, res) => {
@@ -89,4 +87,14 @@ app.post("/messages", async (req, res) => {
   } else {
     res.status(503).send("SSE not initialized");
   }
+});
+
+// 全域錯誤捕捉 (防止任何意外導致崩潰)
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection:', reason);
+});
+
+const port = process.env.PORT || 10000;
+app.listen(port, "0.0.0.0", () => {
+  console.log(`🚀 Server 啟動於 port ${port}`);
 });
